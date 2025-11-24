@@ -1340,14 +1340,20 @@ int __oplus_vid_sync_backlight_thread_ctl(bool enable)
 	struct dsi_display *display = oplus_display_get_current_display();
 	struct sde_connector *sde_conn;
 	char tag_name[64];
-	u32 refresh_rate = display->panel->cur_mode->timing.refresh_rate;
-	u32 last_refresh_rate = display->panel->oplus_panel.last_refresh_rate;
+	u32 refresh_rate;
+	u32 last_refresh_rate;
 
 	if (!display || !display->panel) {
 		OPLUS_DSI_ERR("display is null\n");
 		return -EINVAL;
 	}
+	if (display->panel->panel_mode != DSI_OP_VIDEO_MODE) {
+		return 0;
+	}
+
 	sde_conn = to_sde_connector(display->drm_conn);
+	refresh_rate = display->panel->cur_mode->timing.refresh_rate;
+	last_refresh_rate = display->panel->oplus_panel.last_refresh_rate;
 
 	snprintf(tag_name, sizeof(tag_name), "cur_refresh_rate[%d]-last_refresh_rate[%d]", refresh_rate, last_refresh_rate);
 

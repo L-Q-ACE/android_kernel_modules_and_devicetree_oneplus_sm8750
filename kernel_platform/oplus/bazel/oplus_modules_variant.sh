@@ -13,3 +13,4 @@ echo "bazel_support_variant = [\"$variant\"]" >> $file
 echo "OPLUS_FEATURES = \"${oplus_features}\"" >> $file
 echo "LINUX_KERNEL_VERSION = \"${kernel_version}\"" >> $file
 
+

@@ -3947,6 +3947,11 @@
 		reg = <0x0 0xb8000000 0x0 0x1c0000>;
 	};
 
+	gunyah_hyp_mem1: gunyah_hyp_region1@bd930000 {
+		no-map;
+		reg = <0x0 0xbd930000 0x0 0x800000>;
+	};
+
 	hwfence_shbuf: hwfence-shmem {
 		no-map;
 		reg = <0x0 0xd4e23000 0x0 0x2dd000>;

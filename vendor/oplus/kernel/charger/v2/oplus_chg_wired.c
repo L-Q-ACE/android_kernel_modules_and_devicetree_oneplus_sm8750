@@ -171,6 +171,7 @@ struct oplus_chg_wired {
 	bool disconnect_change;
 	bool retention_state_ready;
 	bool adjust_pdqc_vol_thr_support;
+	bool qc_curr_check_support;
 	bool authenticate;
 	bool hmac;
 	bool vooc_started;
@@ -198,6 +199,7 @@ struct oplus_chg_wired {
 	int chg_ctrl_by_sale_mode;
 	int pd_retry_count;
 	int qc_retry_count;
+	int curr_abnormal_cnt;
 	unsigned int err_code;
 	int factory_test_mode;
 	struct mutex icl_lock;
@@ -635,6 +637,23 @@ static int oplus_wired_current_set(struct oplus_chg_wired *chip,
 	vote(chip->fcc_votable, SPEC_VOTER, true, fcc_ma, false);
 	vote(chip->icl_votable, SPEC_VOTER, true, icl_ma, true);
 	if (!chip->authenticate || !chip->hmac) {
+		rc = oplus_mms_get_item_data(chip->gauge_topic, GAUGE_ITEM_AUTH, &data, false);
+		if (rc < 0) {
+			chg_err("can't get GAUGE_ITEM_AUTH data, rc=%d\n",rc);
+			chip->authenticate = false;
+		} else {
+			chip->authenticate = !!data.intval;
+		}
+		rc = oplus_mms_get_item_data(chip->gauge_topic, GAUGE_ITEM_HMAC, &data, false);
+		if (rc < 0) {
+			chg_err("can't get GAUGE_ITEM_HMAC data, rc=%d\n",rc);
+			chip->hmac  = false;
+		} else {
+			chip->hmac  = !!data.intval;
+		}
+		chg_info("authenticate=%d, hmac=%d \n", chip->authenticate, chip->hmac);
+	}
+	if (!chip->authenticate || !chip->hmac) {
 		vote(chip->fcc_votable, NON_STANDARD_VOTER, true,
 		     spec->non_standard_ibatmax_ma, false);
 		chg_err("!authenticate or !hmac, set nonstandard current\n");
@@ -694,6 +713,7 @@ static void oplus_wired_variables_init(struct oplus_chg_wired *chip)
 	chip->pd_action = OPLUS_ACTION_NULL;
 	chip->pd_retry_count = 0;
 	chip->qc_retry_count = 0;
+	chip->curr_abnormal_cnt = 0;
 	chip->vbus_status = chip->pdqc12v_support ? VBUS_STS_12V_REQ : VBUS_STS_DEFAULT;
 	chip->chg_ctrl_by_sale_mode = 0;
 	mutex_init(&chip->icl_lock);
@@ -909,7 +929,7 @@ static void oplus_wired_qc_config_work(struct work_struct *work)
 		break;
 	case OPLUS_ACTION_BUCK:
 		chg_info("qc starts to buck\n");
-		if (chip->vbus_mv <= PDQC_BUCK_VBUS_THR) {
+		if (chip->vbus_mv <= PDQC_BUCK_VBUS_THR && chip->vbus_set_mv == OPLUS_CHG_VBUS_5V) {
 			chg_info("vbus_mv = %d mv, not need to buck.\n", chip->vbus_mv);
 			chip->qc_action = OPLUS_ACTION_NULL;
 			goto set_curr;
@@ -1036,6 +1056,41 @@ static int oplus_qc_cpa_switch_end(struct oplus_chg_wired *chip)
 				msecs_to_jiffies(SWITCH_END_RECHECK_DELAY_MS));
 	}
 	return 0;
+}
+
+#define QC_CURR_ABNORMAL_CNT_MAX 6
+static void oplus_wired_qc_curr_abnormal_check(struct oplus_chg_wired *chip)
+{
+	union mms_msg_data data = { 0 };
+
+	if (chip->chg_mode != OPLUS_WIRED_CHG_MODE_QC &&
+	    chip->chg_mode != OPLUS_WIRED_CHG_MODE_QC12V)
+		return;
+
+	if (get_effective_result(chip->output_suspend_votable)){
+		chip->curr_abnormal_cnt = 0;
+		return;
+	}
+
+	oplus_mms_get_item_data(chip->gauge_topic, GAUGE_ITEM_CURR, &data, false);
+
+	/* High power causing low ibat if ibus_ma > 100mA */
+	if (data.intval < 0 ||  oplus_wired_get_ibus() > 100){
+		chip->curr_abnormal_cnt = 0;
+		return;
+	}
+
+	chip->curr_abnormal_cnt++;
+	chg_err("ibat_ma=%d vbus_set_mv=%d curr_abnormal_cnt=%d\n", (int)data.intval, chip->vbus_set_mv, chip->curr_abnormal_cnt);
+
+	if (chip->curr_abnormal_cnt < QC_CURR_ABNORMAL_CNT_MAX)
+		return;
+
+	if (chip->qc_action == OPLUS_ACTION_BOOST || chip->vbus_set_mv > OPLUS_CHG_VBUS_5V){
+		cancel_delayed_work_sync(&chip->qc_config_work);
+		chip->qc_action = OPLUS_ACTION_BUCK;
+		schedule_delayed_work(&chip->qc_config_work, 0);
+	}
 }
 
 #define PD_BOOST_DISABLE_ICL_DELAY msecs_to_jiffies(3000)
@@ -1339,6 +1394,8 @@ static void oplus_wired_gauge_update_work(struct work_struct *work)
 
 	oplus_wired_strategy_update(chip);
 	oplus_wired_vbus_check(chip);
+	if (chip->qc_curr_check_support)
+		oplus_wired_qc_curr_abnormal_check(chip);
 	if (!chip->vooc_started)
 		oplus_wired_kick_wdt(chip->wired_topic);
 	if (oplus_wired_is_usb_aicl_enhance() && chip->chg_type == OPLUS_CHG_USB_TYPE_CDP &&
@@ -1637,6 +1694,7 @@ static void oplus_wired_plugin_work(struct work_struct *work)
 		chip->need_common_power_check = false;
 		chip->pd_retry_count = 0;
 		chip->qc_retry_count = 0;
+		chip->curr_abnormal_cnt = 0;
 		chip->vbus_status = chip->pdqc12v_support ? VBUS_STS_12V_REQ : VBUS_STS_DEFAULT;
 		chip->qc_action = OPLUS_ACTION_NULL;
 		chip->pd_action = OPLUS_ACTION_NULL;
@@ -2613,6 +2671,7 @@ static int oplus_wired_parse_dt(struct oplus_chg_wired *chip)
 	chip->pdqc12v_support = of_property_read_bool(node, "oplus,pdqc12v-support");
 	chip->adjust_pdqc_vol_thr_support = of_property_read_bool(node,
 						"oplus,adjust-pdqc-vol-thr-support");
+	chip->qc_curr_check_support = of_property_read_bool(node, "oplus,qc-curr-check-support");
 
 	rc = of_property_read_u32(node, "oplus_spec,pd-iclmax-ma",
 				  &spec->pd_iclmax_ma);
